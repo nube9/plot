@@ -21,14 +21,26 @@ const btnTopView = document.getElementById('btnTopView') as HTMLButtonElement;
 const btnReset = document.getElementById('btnReset') as HTMLButtonElement;
 const chkWireframe = document.getElementById('chkWireframe') as HTMLInputElement;
 const resultsPanel = document.getElementById('results') as HTMLDivElement;
-
-const inputRectX1 = document.getElementById('rectX1') as HTMLInputElement;
-const inputRectY1 = document.getElementById('rectY1') as HTMLInputElement;
-const inputRectX2 = document.getElementById('rectX2') as HTMLInputElement;
-const inputRectY2 = document.getElementById('rectY2') as HTMLInputElement;
-const inputPadElev = document.getElementById('padElevation') as HTMLInputElement;
-const inputPadHeight = document.getElementById('padHeight') as HTMLInputElement;
+const bodiesContainer = document.getElementById('bodies-container') as HTMLDivElement;
+const btnAddBody = document.getElementById('btnAddBody') as HTMLButtonElement;
 const inputGridSize = document.getElementById('gridSize') as HTMLInputElement;
+
+// ─── Multi-body state ────────────────────────────────────────────────
+let nextBodyId = 1;
+
+interface BodyState {
+  id: number;
+  el: HTMLDivElement;
+  x1: HTMLInputElement;
+  y1: HTMLInputElement;
+  x2: HTMLInputElement;
+  y2: HTMLInputElement;
+  elev: HTMLInputElement;
+  height: HTMLInputElement;
+  group: THREE.Group;
+}
+
+const bodies = new Map<number, BodyState>();
 
 // ─── Three.js setup ──────────────────────────────────────────────────
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -52,8 +64,7 @@ scene.add(dirLight);
 
 // Groups
 const terrainGroup = new THREE.Group();
-const rectGroup = new THREE.Group();
-scene.add(terrainGroup, rectGroup);
+scene.add(terrainGroup);
 
 let terrainMesh: THREE.Mesh | null = null;
 let wireframeMesh: THREE.LineSegments | null = null;
@@ -95,9 +106,13 @@ csvInput.addEventListener('change', async () => {
     buildTerrainMesh();
     fitCamera();
 
-    // Auto-suggest pad elevation from terrain
-    const minZ = Math.min(...terrainPoints.map(p => p.z));
-    inputPadElev.value = minZ.toFixed(1);
+    // Create first body if none exist
+    if (bodies.size === 0) {
+      const body = createBody();
+      // Auto-suggest pad elevation from terrain
+      const minZ = Math.min(...terrainPoints.map(p => p.z));
+      body.elev.value = minZ.toFixed(1);
+    }
   } catch (e: unknown) {
     statusEl.textContent = `Error: ${(e as Error).message}`;
   }
@@ -172,31 +187,147 @@ function fitCamera() {
   controls.update();
 }
 
-// ─── Read rectangle from form ────────────────────────────────────────
-function readRectangle(): Rectangle | null {
-  const x1 = parseFloat(inputRectX1.value);
-  const y1 = parseFloat(inputRectY1.value);
-  const x2 = parseFloat(inputRectX2.value);
-  const y2 = parseFloat(inputRectY2.value);
-  const elev = parseFloat(inputPadElev.value);
+// ─── Body management ─────────────────────────────────────────────────
 
-  if ([x1, y1, x2, y2, elev].some(isNaN)) return null;
+function createBody(): BodyState {
+  const id = nextBodyId++;
 
-  const ph = parseFloat(inputPadHeight.value);
+  const el = document.createElement('div');
+  el.className = 'body-section';
 
-  return {
-    minX: Math.min(x1, x2),
-    minY: Math.min(y1, y2),
-    maxX: Math.max(x1, x2),
-    maxY: Math.max(y1, y2),
-    elevation: elev,
-    padHeight: isNaN(ph) ? 0 : ph,
-  };
+  const header = document.createElement('div');
+  header.className = 'body-header';
+  const title = document.createElement('span');
+  title.textContent = `Body ${id}`;
+  header.appendChild(title);
+
+  const btnRemove = document.createElement('button');
+  btnRemove.className = 'btn-remove';
+  btnRemove.textContent = 'Remove';
+  btnRemove.addEventListener('click', () => removeBody(id));
+  header.appendChild(btnRemove);
+
+  el.appendChild(header);
+
+  // Helper to create a number input
+  function makeInput(placeholder: string, value?: string): HTMLInputElement {
+    const inp = document.createElement('input');
+    inp.type = 'number';
+    inp.placeholder = placeholder;
+    if (value !== undefined) inp.value = value;
+    inp.addEventListener('input', debouncedUpdateAllVisuals);
+    return inp;
+  }
+
+  // Corner 1
+  const lbl1 = document.createElement('label');
+  lbl1.textContent = 'Corner 1';
+  el.appendChild(lbl1);
+
+  const row1 = document.createElement('div');
+  row1.className = 'coord-row';
+  const x1 = makeInput('X1');
+  const y1 = makeInput('Y1');
+  const d1a = document.createElement('div');
+  d1a.appendChild(x1);
+  const d1b = document.createElement('div');
+  d1b.appendChild(y1);
+  row1.appendChild(d1a);
+  row1.appendChild(d1b);
+  el.appendChild(row1);
+
+  // Corner 2
+  const lbl2 = document.createElement('label');
+  lbl2.textContent = 'Corner 2';
+  el.appendChild(lbl2);
+
+  const row2 = document.createElement('div');
+  row2.className = 'coord-row';
+  const x2 = makeInput('X2');
+  const y2 = makeInput('Y2');
+  const d2a = document.createElement('div');
+  d2a.appendChild(x2);
+  const d2b = document.createElement('div');
+  d2b.appendChild(y2);
+  row2.appendChild(d2a);
+  row2.appendChild(d2b);
+  el.appendChild(row2);
+
+  // Elevation
+  const lblElev = document.createElement('label');
+  lblElev.textContent = 'Pad Elevation (m)';
+  el.appendChild(lblElev);
+  const elev = makeInput('Elevation', '100');
+  elev.step = '0.1';
+  el.appendChild(elev);
+
+  // Height
+  const lblHeight = document.createElement('label');
+  lblHeight.textContent = 'Pad Height (m)';
+  el.appendChild(lblHeight);
+  const height = makeInput('Height', '3');
+  height.step = '0.1';
+  height.min = '0';
+  el.appendChild(height);
+
+  bodiesContainer.appendChild(el);
+
+  const group = new THREE.Group();
+  scene.add(group);
+
+  const body: BodyState = { id, el, x1, y1, x2, y2, elev, height, group };
+  bodies.set(id, body);
+
+  updateRemoveButtons();
+  return body;
 }
 
-// ─── Visualize rectangle in 3D ───────────────────────────────────────
+function removeBody(id: number) {
+  const body = bodies.get(id);
+  if (!body) return;
 
-function drawFlatRect(rect: Rectangle) {
+  body.el.remove();
+  scene.remove(body.group);
+  bodies.delete(id);
+
+  updateRemoveButtons();
+  debouncedUpdateAllVisuals();
+}
+
+function updateRemoveButtons() {
+  const showRemove = bodies.size > 1;
+  for (const body of bodies.values()) {
+    const btn = body.el.querySelector('.btn-remove') as HTMLButtonElement | null;
+    if (btn) btn.style.display = showRemove ? '' : 'none';
+  }
+}
+
+function readBodies(): Rectangle[] {
+  const rects: Rectangle[] = [];
+  for (const body of bodies.values()) {
+    const x1 = parseFloat(body.x1.value);
+    const y1 = parseFloat(body.y1.value);
+    const x2 = parseFloat(body.x2.value);
+    const y2 = parseFloat(body.y2.value);
+    const elev = parseFloat(body.elev.value);
+    if ([x1, y1, x2, y2, elev].some(isNaN)) continue;
+
+    const ph = parseFloat(body.height.value);
+    rects.push({
+      minX: Math.min(x1, x2),
+      minY: Math.min(y1, y2),
+      maxX: Math.max(x1, x2),
+      maxY: Math.max(y1, y2),
+      elevation: elev,
+      padHeight: isNaN(ph) ? 0 : ph,
+    });
+  }
+  return rects;
+}
+
+// ─── Visualize bodies in 3D ──────────────────────────────────────────
+
+function drawFlatRect(rect: Rectangle, group: THREE.Group) {
   const z = rect.elevation - terrainCenter.z + 0.3;
   const cx = terrainCenter.x;
   const cy = terrainCenter.y;
@@ -211,7 +342,7 @@ function drawFlatRect(rect: Rectangle) {
 
   const lineGeo = new THREE.BufferGeometry().setFromPoints(corners);
   const lineMat = new THREE.LineBasicMaterial({ color: 0xe94560, linewidth: 2 });
-  rectGroup.add(new THREE.Line(lineGeo, lineMat));
+  group.add(new THREE.Line(lineGeo, lineMat));
 
   const w = rect.maxX - rect.minX;
   const h = rect.maxY - rect.minY;
@@ -229,10 +360,10 @@ function drawFlatRect(rect: Rectangle) {
     (rect.minY + rect.maxY) / 2 - cy,
     z - 0.1
   );
-  rectGroup.add(fillMesh);
+  group.add(fillMesh);
 }
 
-function drawBox(rect: Rectangle) {
+function drawBox(rect: Rectangle, group: THREE.Group) {
   const cx = terrainCenter.x;
   const cy = terrainCenter.y;
   const cz = terrainCenter.z;
@@ -262,12 +393,10 @@ function drawBox(rect: Rectangle) {
   const amberR = 0.9, amberG = 0.6, amberB = 0.15;
 
   for (let i = 0; i < vertCount; i++) {
-    // Local vertex position (box centered at origin)
     const lx = posAttr.getX(i);
     const ly = posAttr.getY(i);
     const lz = posAttr.getZ(i);
 
-    // World coordinates
     const worldX = lx + centerX + cx;
     const worldY = ly + centerY + cy;
     const worldZ = lz + centerZ + cz;
@@ -297,40 +426,60 @@ function drawBox(rect: Rectangle) {
 
   const boxMesh = new THREE.Mesh(boxGeo, boxMat);
   boxMesh.position.set(centerX, centerY, centerZ);
-  rectGroup.add(boxMesh);
+  group.add(boxMesh);
 
   // Edge lines — only show the 12 box edges, not subdivision grid
   const edgesGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(w, d, h), 15);
   const edgesMat = new THREE.LineBasicMaterial({ color: 0x333355 });
   const edgesMesh = new THREE.LineSegments(edgesGeo, edgesMat);
   edgesMesh.position.set(centerX, centerY, centerZ);
-  rectGroup.add(edgesMesh);
+  group.add(edgesMesh);
 }
 
-function updateRectVisual() {
-  rectGroup.clear();
+function updateBodyVisual(body: BodyState) {
+  body.group.clear();
 
-  const rect = readRectangle();
-  if (!rect || terrainPoints.length === 0) return;
+  if (terrainPoints.length === 0) return;
+
+  const x1 = parseFloat(body.x1.value);
+  const y1 = parseFloat(body.y1.value);
+  const x2 = parseFloat(body.x2.value);
+  const y2 = parseFloat(body.y2.value);
+  const elev = parseFloat(body.elev.value);
+  if ([x1, y1, x2, y2, elev].some(isNaN)) return;
+
+  const ph = parseFloat(body.height.value);
+  const rect: Rectangle = {
+    minX: Math.min(x1, x2),
+    minY: Math.min(y1, y2),
+    maxX: Math.max(x1, x2),
+    maxY: Math.max(y1, y2),
+    elevation: elev,
+    padHeight: isNaN(ph) ? 0 : ph,
+  };
 
   if (rect.padHeight < 0.01) {
-    drawFlatRect(rect);
+    drawFlatRect(rect, body.group);
   } else {
-    drawBox(rect);
+    drawBox(rect, body.group);
+  }
+}
+
+function updateAllVisuals() {
+  for (const body of bodies.values()) {
+    updateBodyVisual(body);
   }
 }
 
 // Debounce helper
-let rectUpdateTimer: ReturnType<typeof setTimeout> | null = null;
-function debouncedUpdateRectVisual() {
-  if (rectUpdateTimer) clearTimeout(rectUpdateTimer);
-  rectUpdateTimer = setTimeout(updateRectVisual, 100);
+let visualUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+function debouncedUpdateAllVisuals() {
+  if (visualUpdateTimer) clearTimeout(visualUpdateTimer);
+  visualUpdateTimer = setTimeout(updateAllVisuals, 100);
 }
 
-// Update rectangle visual when any coordinate, elevation, or height input changes
-for (const input of [inputRectX1, inputRectY1, inputRectX2, inputRectY2, inputPadElev, inputPadHeight]) {
-  input.addEventListener('input', debouncedUpdateRectVisual);
-}
+// "Add Body" button
+btnAddBody.addEventListener('click', () => createBody());
 
 // ─── Wireframe toggle ────────────────────────────────────────────────
 chkWireframe.addEventListener('change', () => {
@@ -352,7 +501,7 @@ btnTopView.addEventListener('click', () => {
 // ─── Reset ───────────────────────────────────────────────────────────
 btnReset.addEventListener('click', () => {
   resultsPanel.style.display = 'none';
-  rectGroup.clear();
+  for (const body of bodies.values()) body.group.clear();
 
   // Reset terrain colors to gray
   if (terrainMesh) {
@@ -370,9 +519,9 @@ btnReset.addEventListener('click', () => {
 
 // ─── Compute ─────────────────────────────────────────────────────────
 btnCompute.addEventListener('click', () => {
-  const rect = readRectangle();
-  if (!rect) {
-    statusEl.textContent = 'Enter valid rectangle coordinates and elevation';
+  const allBodies = readBodies();
+  if (allBodies.length === 0) {
+    statusEl.textContent = 'Enter valid coordinates and elevation for at least one body';
     return;
   }
 
@@ -383,10 +532,10 @@ btnCompute.addEventListener('click', () => {
   }
 
   statusEl.textContent = 'Computing volumes...';
-  updateRectVisual();
+  updateAllVisuals();
 
   setTimeout(() => {
-    const result = computeVolume(terrainPoints, tinTriangles, rect, gridSize);
+    const result = computeVolume(terrainPoints, tinTriangles, allBodies, gridSize);
 
     resultsPanel.style.display = 'block';
     document.getElementById('resCut')!.textContent = `${result.cut.toFixed(1)} m³`;
@@ -397,12 +546,12 @@ btnCompute.addEventListener('click', () => {
 
     statusEl.textContent = `Done. ${result.cellCount} cells sampled.`;
 
-    colorizeTerrain(rect);
+    colorizeTerrain(allBodies);
   }, 10);
 });
 
 // ─── Colorize terrain ────────────────────────────────────────────────
-function colorizeTerrain(rect: Rectangle) {
+function colorizeTerrain(allBodies: Rectangle[]) {
   if (!terrainMesh) return;
 
   const colors = terrainMesh.geometry.getAttribute('color') as THREE.BufferAttribute;
@@ -412,7 +561,7 @@ function colorizeTerrain(rect: Rectangle) {
 
   for (let i = 0; i < terrainPoints.length; i++) {
     const p = terrainPoints[i];
-    const zDesign = designHeight(p.x, p.y, rect);
+    const zDesign = designHeight(p.x, p.y, allBodies);
     if (zDesign !== null) {
       const dz = zDesign - p.z;
       dzValues.push(dz);

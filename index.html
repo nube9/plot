@@ -173,6 +173,59 @@
       margin: 0;
       cursor: pointer;
     }
+
+    .body-list-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .body-list-header h2 {
+      margin-bottom: 0;
+    }
+
+    .body-list-header .btn-secondary {
+      width: auto;
+      padding: 4px 12px;
+      font-size: 12px;
+    }
+
+    .body-section {
+      background: #16213e;
+      border: 1px solid #0f3460;
+      border-radius: 4px;
+      padding: 8px;
+      margin-bottom: 8px;
+    }
+
+    .body-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+
+    .body-header span {
+      font-size: 12px;
+      font-weight: 600;
+      color: #ccc;
+    }
+
+    .btn-remove {
+      background: transparent;
+      border: 1px solid #e94560;
+      color: #e94560;
+      width: auto;
+      padding: 2px 8px;
+      font-size: 11px;
+      border-radius: 3px;
+    }
+
+    .btn-remove:hover {
+      background: #e94560;
+      color: white;
+    }
   </style>
 </head>
 <body>
@@ -187,33 +240,11 @@
     </div>
 
     <div class="section">
-      <h2>Rectangle Pad</h2>
-      <label>Corner 1</label>
-      <div class="coord-row">
-        <div>
-          <input type="number" id="rectX1" placeholder="X1" />
-        </div>
-        <div>
-          <input type="number" id="rectY1" placeholder="Y1" />
-        </div>
+      <div class="body-list-header">
+        <h2>Bodies</h2>
+        <button id="btnAddBody" class="btn-secondary">+ Add</button>
       </div>
-
-      <label>Corner 2</label>
-      <div class="coord-row">
-        <div>
-          <input type="number" id="rectX2" placeholder="X2" />
-        </div>
-        <div>
-          <input type="number" id="rectY2" placeholder="Y2" />
-        </div>
-      </div>
-
-      <label for="padElevation">Pad Elevation (m)</label>
-      <input type="number" id="padElevation" value="100" step="0.1" />
-
-      <label for="padHeight">Pad Height (m)</label>
-      <input type="number" id="padHeight" value="3" step="0.1" min="0" />
-
+      <div id="bodies-container"></div>
       <label for="gridSize">Grid Size (m)</label>
       <input type="number" id="gridSize" value="1" step="0.1" min="0.1" />
     </div>

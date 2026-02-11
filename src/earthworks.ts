@@ -5,20 +5,33 @@ import { designHeight } from './design';
 export function computeVolume(
   terrainPoints: Point3D[],
   triangles: Uint32Array,
-  rect: Rectangle,
+  bodies: Rectangle[],
   gridSize: number
 ): VolumeResult {
+  if (bodies.length === 0) {
+    return { cut: 0, fill: 0, net: 0, areaSampled: 0, cellCount: 0 };
+  }
+
+  // Union bounding box across all bodies
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const rect of bodies) {
+    if (rect.minX < minX) minX = rect.minX;
+    if (rect.minY < minY) minY = rect.minY;
+    if (rect.maxX > maxX) maxX = rect.maxX;
+    if (rect.maxY > maxY) maxY = rect.maxY;
+  }
+
   const cellArea = gridSize * gridSize;
   let cut = 0;
   let fill = 0;
   let cellCount = 0;
 
-  for (let x = rect.minX; x <= rect.maxX; x += gridSize) {
-    for (let y = rect.minY; y <= rect.maxY; y += gridSize) {
+  for (let x = minX; x <= maxX; x += gridSize) {
+    for (let y = minY; y <= maxY; y += gridSize) {
       const zExisting = terrainHeight(x, y, terrainPoints, triangles);
       if (zExisting === null) continue;
 
-      const zDesign = designHeight(x, y, rect);
+      const zDesign = designHeight(x, y, bodies);
       if (zDesign === null) continue;
 
       const dz = zDesign - zExisting;

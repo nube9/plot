@@ -4,13 +4,11 @@ import { parseCSV } from './csv';
 import { buildTIN, terrainHeight } from './tin';
 import { designHeight } from './design';
 import { computeVolume } from './earthworks';
-import { Point2D, Point3D } from './types';
+import { Point3D, Rectangle } from './types';
 
 // ─── State ───────────────────────────────────────────────────────────
 let terrainPoints: Point3D[] = [];
 let tinTriangles: Uint32Array = new Uint32Array();
-let polygonVertices: Point2D[] = [];
-let drawingMode = false;
 let terrainCenter = new THREE.Vector3();
 
 // ─── DOM refs ────────────────────────────────────────────────────────
@@ -18,17 +16,18 @@ const canvas = document.getElementById('viewport') as HTMLCanvasElement;
 const container = document.getElementById('canvas-container') as HTMLDivElement;
 const csvInput = document.getElementById('csvFile') as HTMLInputElement;
 const statusEl = document.getElementById('status') as HTMLDivElement;
-const btnDraw = document.getElementById('btnDraw') as HTMLButtonElement;
 const btnCompute = document.getElementById('btnCompute') as HTMLButtonElement;
 const btnTopView = document.getElementById('btnTopView') as HTMLButtonElement;
 const btnReset = document.getElementById('btnReset') as HTMLButtonElement;
 const chkWireframe = document.getElementById('chkWireframe') as HTMLInputElement;
-const drawHint = document.getElementById('draw-hint') as HTMLDivElement;
 const resultsPanel = document.getElementById('results') as HTMLDivElement;
 
+const inputRectX1 = document.getElementById('rectX1') as HTMLInputElement;
+const inputRectY1 = document.getElementById('rectY1') as HTMLInputElement;
+const inputRectX2 = document.getElementById('rectX2') as HTMLInputElement;
+const inputRectY2 = document.getElementById('rectY2') as HTMLInputElement;
 const inputPadElev = document.getElementById('padElevation') as HTMLInputElement;
-const inputSlopeRatio = document.getElementById('slopeRatio') as HTMLInputElement;
-const inputSlopeMaxDist = document.getElementById('slopeMaxDist') as HTMLInputElement;
+const inputPadHeight = document.getElementById('padHeight') as HTMLInputElement;
 const inputGridSize = document.getElementById('gridSize') as HTMLInputElement;
 
 // ─── Three.js setup ──────────────────────────────────────────────────
@@ -53,13 +52,11 @@ scene.add(dirLight);
 
 // Groups
 const terrainGroup = new THREE.Group();
-const polygonGroup = new THREE.Group();
-const markerGroup = new THREE.Group();
-scene.add(terrainGroup, polygonGroup, markerGroup);
+const rectGroup = new THREE.Group();
+scene.add(terrainGroup, rectGroup);
 
 let terrainMesh: THREE.Mesh | null = null;
 let wireframeMesh: THREE.LineSegments | null = null;
-let padPlaneMesh: THREE.Mesh | null = null;
 
 // ─── Resize handling ─────────────────────────────────────────────────
 function resize() {
@@ -93,10 +90,14 @@ csvInput.addEventListener('change', async () => {
     tinTriangles = tin.triangles;
 
     statusEl.textContent = `Loaded ${terrainPoints.length} points, ${tinTriangles.length / 3} triangles`;
-    btnDraw.disabled = false;
+    btnCompute.disabled = false;
 
     buildTerrainMesh();
     fitCamera();
+
+    // Auto-suggest pad elevation from terrain
+    const minZ = Math.min(...terrainPoints.map(p => p.z));
+    inputPadElev.value = minZ.toFixed(1);
   } catch (e: unknown) {
     statusEl.textContent = `Error: ${(e as Error).message}`;
   }
@@ -104,13 +105,11 @@ csvInput.addEventListener('change', async () => {
 
 // ─── Build terrain mesh ──────────────────────────────────────────────
 function buildTerrainMesh() {
-  // Clear previous
   terrainGroup.clear();
   terrainMesh = null;
   wireframeMesh = null;
 
   const positions = new Float32Array(terrainPoints.length * 3);
-  // Compute center for offsetting
   let cx = 0, cy = 0, cz = 0;
   for (const p of terrainPoints) {
     cx += p.x; cy += p.y; cz += p.z;
@@ -136,7 +135,6 @@ function buildTerrainMesh() {
   geometry.setIndex(new THREE.BufferAttribute(indices, 1));
   geometry.computeVertexNormals();
 
-  // Initialize vertex colors to gray
   const colors = new Float32Array(terrainPoints.length * 3);
   for (let i = 0; i < terrainPoints.length; i++) {
     colors[i * 3] = 0.6;
@@ -154,7 +152,6 @@ function buildTerrainMesh() {
   terrainMesh = new THREE.Mesh(geometry, material);
   terrainGroup.add(terrainMesh);
 
-  // Wireframe
   const wireGeo = new THREE.WireframeGeometry(geometry);
   const wireMat = new THREE.LineBasicMaterial({ color: 0x333355, transparent: true, opacity: 0.3 });
   wireframeMesh = new THREE.LineSegments(wireGeo, wireMat);
@@ -175,54 +172,165 @@ function fitCamera() {
   controls.update();
 }
 
-// ─── Pad elevation plane ─────────────────────────────────────────────
-function getPadPlaneZ(): number {
-  return parseFloat(inputPadElev.value) - terrainCenter.z;
+// ─── Read rectangle from form ────────────────────────────────────────
+function readRectangle(): Rectangle | null {
+  const x1 = parseFloat(inputRectX1.value);
+  const y1 = parseFloat(inputRectY1.value);
+  const x2 = parseFloat(inputRectX2.value);
+  const y2 = parseFloat(inputRectY2.value);
+  const elev = parseFloat(inputPadElev.value);
+
+  if ([x1, y1, x2, y2, elev].some(isNaN)) return null;
+
+  const ph = parseFloat(inputPadHeight.value);
+
+  return {
+    minX: Math.min(x1, x2),
+    minY: Math.min(y1, y2),
+    maxX: Math.max(x1, x2),
+    maxY: Math.max(y1, y2),
+    elevation: elev,
+    padHeight: isNaN(ph) ? 0 : ph,
+  };
 }
 
-function updatePadPlane() {
-  if (padPlaneMesh) {
-    scene.remove(padPlaneMesh);
-    padPlaneMesh.geometry.dispose();
-    (padPlaneMesh.material as THREE.Material).dispose();
-    padPlaneMesh = null;
-  }
+// ─── Visualize rectangle in 3D ───────────────────────────────────────
 
-  if (terrainPoints.length === 0) return;
+function drawFlatRect(rect: Rectangle) {
+  const z = rect.elevation - terrainCenter.z + 0.3;
+  const cx = terrainCenter.x;
+  const cy = terrainCenter.y;
 
-  // Size the plane to cover the terrain bounding box with some margin
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const p of terrainPoints) {
-    if (p.x - terrainCenter.x < minX) minX = p.x - terrainCenter.x;
-    if (p.y - terrainCenter.y < minY) minY = p.y - terrainCenter.y;
-    if (p.x - terrainCenter.x > maxX) maxX = p.x - terrainCenter.x;
-    if (p.y - terrainCenter.y > maxY) maxY = p.y - terrainCenter.y;
-  }
+  const corners = [
+    new THREE.Vector3(rect.minX - cx, rect.minY - cy, z),
+    new THREE.Vector3(rect.maxX - cx, rect.minY - cy, z),
+    new THREE.Vector3(rect.maxX - cx, rect.maxY - cy, z),
+    new THREE.Vector3(rect.minX - cx, rect.maxY - cy, z),
+    new THREE.Vector3(rect.minX - cx, rect.minY - cy, z),
+  ];
 
-  const margin = 5;
-  const w = (maxX - minX) + margin * 2;
-  const h = (maxY - minY) + margin * 2;
-  const cx = (minX + maxX) / 2;
-  const cy = (minY + maxY) / 2;
+  const lineGeo = new THREE.BufferGeometry().setFromPoints(corners);
+  const lineMat = new THREE.LineBasicMaterial({ color: 0xe94560, linewidth: 2 });
+  rectGroup.add(new THREE.Line(lineGeo, lineMat));
 
-  const geo = new THREE.PlaneGeometry(w, h);
-  const mat = new THREE.MeshBasicMaterial({
-    color: 0x44aa88,
+  const w = rect.maxX - rect.minX;
+  const h = rect.maxY - rect.minY;
+  const fillGeo = new THREE.PlaneGeometry(w, h);
+  const fillMat = new THREE.MeshBasicMaterial({
+    color: 0xe94560,
     transparent: true,
-    opacity: 0.25,
+    opacity: 0.2,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const fillMesh = new THREE.Mesh(fillGeo, fillMat);
+  fillMesh.position.set(
+    (rect.minX + rect.maxX) / 2 - cx,
+    (rect.minY + rect.maxY) / 2 - cy,
+    z - 0.1
+  );
+  rectGroup.add(fillMesh);
+}
+
+function drawBox(rect: Rectangle) {
+  const cx = terrainCenter.x;
+  const cy = terrainCenter.y;
+  const cz = terrainCenter.z;
+
+  const w = rect.maxX - rect.minX;
+  const d = rect.maxY - rect.minY;
+  const h = rect.padHeight;
+
+  // Adaptive subdivision: ~0.5m horizontal, ~0.3m vertical, capped at 60
+  const sx = Math.min(Math.max(Math.ceil(w / 0.5), 1), 60);
+  const sy = Math.min(Math.max(Math.ceil(d / 0.5), 1), 60);
+  const sz = Math.min(Math.max(Math.ceil(h / 0.3), 1), 60);
+
+  const boxGeo = new THREE.BoxGeometry(w, d, h, sx, sy, sz);
+
+  // BoxGeometry is centered at origin — position so bottom face sits at pad elevation
+  const centerX = (rect.minX + rect.maxX) / 2 - cx;
+  const centerY = (rect.minY + rect.maxY) / 2 - cy;
+  const centerZ = rect.elevation + h / 2 - cz;
+
+  const posAttr = boxGeo.getAttribute('position');
+  const vertCount = posAttr.count;
+  const colors = new Float32Array(vertCount * 3);
+
+  // White and amber colors
+  const whiteR = 1.0, whiteG = 1.0, whiteB = 1.0;
+  const amberR = 0.9, amberG = 0.6, amberB = 0.15;
+
+  for (let i = 0; i < vertCount; i++) {
+    // Local vertex position (box centered at origin)
+    const lx = posAttr.getX(i);
+    const ly = posAttr.getY(i);
+    const lz = posAttr.getZ(i);
+
+    // World coordinates
+    const worldX = lx + centerX + cx;
+    const worldY = ly + centerY + cy;
+    const worldZ = lz + centerZ + cz;
+
+    const tHeight = terrainHeight(worldX, worldY, terrainPoints, tinTriangles);
+
+    if (tHeight !== null && worldZ < tHeight) {
+      colors[i * 3] = amberR;
+      colors[i * 3 + 1] = amberG;
+      colors[i * 3 + 2] = amberB;
+    } else {
+      colors[i * 3] = whiteR;
+      colors[i * 3 + 1] = whiteG;
+      colors[i * 3 + 2] = whiteB;
+    }
+  }
+
+  boxGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  const boxMat = new THREE.MeshPhongMaterial({
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.65,
     side: THREE.DoubleSide,
     depthWrite: false,
   });
 
-  padPlaneMesh = new THREE.Mesh(geo, mat);
-  padPlaneMesh.position.set(cx, cy, getPadPlaneZ());
-  scene.add(padPlaneMesh);
+  const boxMesh = new THREE.Mesh(boxGeo, boxMat);
+  boxMesh.position.set(centerX, centerY, centerZ);
+  rectGroup.add(boxMesh);
+
+  // Edge lines — only show the 12 box edges, not subdivision grid
+  const edgesGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(w, d, h), 15);
+  const edgesMat = new THREE.LineBasicMaterial({ color: 0x333355 });
+  const edgesMesh = new THREE.LineSegments(edgesGeo, edgesMat);
+  edgesMesh.position.set(centerX, centerY, centerZ);
+  rectGroup.add(edgesMesh);
 }
 
-inputPadElev.addEventListener('input', () => {
-  updatePadPlane();
-  updatePolygonVisuals();
-});
+function updateRectVisual() {
+  rectGroup.clear();
+
+  const rect = readRectangle();
+  if (!rect || terrainPoints.length === 0) return;
+
+  if (rect.padHeight < 0.01) {
+    drawFlatRect(rect);
+  } else {
+    drawBox(rect);
+  }
+}
+
+// Debounce helper
+let rectUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+function debouncedUpdateRectVisual() {
+  if (rectUpdateTimer) clearTimeout(rectUpdateTimer);
+  rectUpdateTimer = setTimeout(updateRectVisual, 100);
+}
+
+// Update rectangle visual when any coordinate, elevation, or height input changes
+for (const input of [inputRectX1, inputRectY1, inputRectX2, inputRectY2, inputPadElev, inputPadHeight]) {
+  input.addEventListener('input', debouncedUpdateRectVisual);
+}
 
 // ─── Wireframe toggle ────────────────────────────────────────────────
 chkWireframe.addEventListener('change', () => {
@@ -243,14 +351,8 @@ btnTopView.addEventListener('click', () => {
 
 // ─── Reset ───────────────────────────────────────────────────────────
 btnReset.addEventListener('click', () => {
-  polygonVertices = [];
-  drawingMode = false;
-  drawHint.style.display = 'none';
-  btnDraw.textContent = 'Draw Polygon';
-  btnCompute.disabled = true;
   resultsPanel.style.display = 'none';
-  polygonGroup.clear();
-  markerGroup.clear();
+  rectGroup.clear();
 
   // Reset terrain colors to gray
   if (terrainMesh) {
@@ -266,191 +368,26 @@ btnReset.addEventListener('click', () => {
     : 'No terrain loaded';
 });
 
-// ─── Polygon drawing ─────────────────────────────────────────────────
-btnDraw.addEventListener('click', () => {
-  if (!drawingMode) {
-    drawingMode = true;
-    polygonVertices = [];
-    polygonGroup.clear();
-    markerGroup.clear();
-    btnDraw.textContent = 'Cancel Drawing';
-    btnCompute.disabled = true;
-    drawHint.style.display = 'block';
-    controls.enabled = false;
-
-    // Auto-switch to top view for plan-view drawing
-    if (terrainMesh) {
-      const box = new THREE.Box3().setFromObject(terrainMesh);
-      const size = box.getSize(new THREE.Vector3());
-      const maxDim = Math.max(size.x, size.y);
-      camera.position.set(0, 0, maxDim * 2);
-      camera.up.set(0, 1, 0);
-      controls.target.set(0, 0, 0);
-      controls.update();
-    }
-  } else {
-    drawingMode = false;
-    drawHint.style.display = 'none';
-    btnDraw.textContent = 'Draw Polygon';
-    polygonGroup.clear();
-    markerGroup.clear();
-    polygonVertices = [];
-    controls.enabled = true;
-  }
-});
-
-// Raycaster for polygon drawing
-const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
-
-function getHorizontalIntersection(event: MouseEvent): THREE.Vector3 | null {
-  const rect = canvas.getBoundingClientRect();
-  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
-  raycaster.setFromCamera(mouse, camera);
-
-  // Intersect the horizontal plane at pad elevation
-  const planeZ = getPadPlaneZ();
-  const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ);
-  const target = new THREE.Vector3();
-  const hit = raycaster.ray.intersectPlane(plane, target);
-  return hit ? target : null;
-}
-
-function addPolygonVertex(worldPos: THREE.Vector3) {
-  // Convert back to terrain coordinates
-  const terrainX = worldPos.x + terrainCenter.x;
-  const terrainY = worldPos.y + terrainCenter.y;
-  polygonVertices.push({ x: terrainX, y: terrainY });
-
-  // Add marker sphere on the pad plane
-  const marker = new THREE.Mesh(
-    new THREE.SphereGeometry(0.5, 8, 8),
-    new THREE.MeshBasicMaterial({ color: 0xe94560 })
-  );
-  const pz = getPadPlaneZ() + 0.3;
-  marker.position.set(worldPos.x, worldPos.y, pz);
-  markerGroup.add(marker);
-
-  // Update polygon line
-  updatePolygonLine(false);
-
-  statusEl.textContent = `Polygon: ${polygonVertices.length} vertices placed`;
-}
-
-function closePolygon() {
-  if (polygonVertices.length < 3) {
-    statusEl.textContent = 'Need at least 3 vertices';
-    return;
-  }
-
-  drawingMode = false;
-  drawHint.style.display = 'none';
-  btnDraw.textContent = 'Draw Polygon';
-  btnCompute.disabled = false;
-  controls.enabled = true;
-
-  updatePolygonLine(true);
-  statusEl.textContent = `Polygon closed with ${polygonVertices.length} vertices`;
-}
-
-function updatePolygonVisuals() {
-  updatePolygonLine(polygonVertices.length >= 3 && !drawingMode);
-  // Update marker positions to match pad plane
-  const pz = getPadPlaneZ() + 0.3;
-  markerGroup.children.forEach(m => { m.position.z = pz; });
-}
-
-function updatePolygonLine(closed: boolean) {
-  polygonGroup.clear();
-
-  if (polygonVertices.length < 2) return;
-
-  const pz = getPadPlaneZ() + 0.3;
-
-  // Draw polygon flat on the pad elevation plane
-  const linePoints: THREE.Vector3[] = polygonVertices.map(v =>
-    new THREE.Vector3(v.x - terrainCenter.x, v.y - terrainCenter.y, pz)
-  );
-
-  if (closed) {
-    linePoints.push(linePoints[0].clone());
-  }
-
-  const lineGeo = new THREE.BufferGeometry().setFromPoints(linePoints);
-  const lineMat = new THREE.LineBasicMaterial({ color: 0xe94560, linewidth: 2 });
-  polygonGroup.add(new THREE.Line(lineGeo, lineMat));
-
-  // If closed, also add a semi-transparent fill so the pad footprint is clearly visible
-  if (closed && polygonVertices.length >= 3) {
-    const shape = new THREE.Shape();
-    const first = polygonVertices[0];
-    shape.moveTo(first.x - terrainCenter.x, first.y - terrainCenter.y);
-    for (let i = 1; i < polygonVertices.length; i++) {
-      shape.lineTo(polygonVertices[i].x - terrainCenter.x, polygonVertices[i].y - terrainCenter.y);
-    }
-    shape.closePath();
-    const fillGeo = new THREE.ShapeGeometry(shape);
-    const fillMat = new THREE.MeshBasicMaterial({
-      color: 0xe94560,
-      transparent: true,
-      opacity: 0.2,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    });
-    const fillMesh = new THREE.Mesh(fillGeo, fillMat);
-    fillMesh.position.z = pz - 0.1;
-    polygonGroup.add(fillMesh);
-  }
-}
-
-canvas.addEventListener('click', (e) => {
-  if (!drawingMode) return;
-  const pos = getHorizontalIntersection(e);
-  if (pos) addPolygonVertex(pos);
-});
-
-canvas.addEventListener('dblclick', (e) => {
-  if (!drawingMode) return;
-  e.preventDefault();
-  closePolygon();
-});
-
-// Prevent orbit controls from triggering on single click in draw mode
-canvas.addEventListener('mousedown', (e) => {
-  if (drawingMode) {
-    e.stopPropagation();
-  }
-}, true);
-
 // ─── Compute ─────────────────────────────────────────────────────────
 btnCompute.addEventListener('click', () => {
-  if (polygonVertices.length < 3) {
-    statusEl.textContent = 'Draw a polygon first';
+  const rect = readRectangle();
+  if (!rect) {
+    statusEl.textContent = 'Enter valid rectangle coordinates and elevation';
     return;
   }
 
-  const padElev = parseFloat(inputPadElev.value);
-  const slopeRatio = parseFloat(inputSlopeRatio.value);
-  const slopeMaxDist = parseFloat(inputSlopeMaxDist.value);
   const gridSize = parseFloat(inputGridSize.value);
-
-  if ([padElev, slopeRatio, slopeMaxDist, gridSize].some(isNaN)) {
-    statusEl.textContent = 'Invalid parameter values';
+  if (isNaN(gridSize) || gridSize <= 0) {
+    statusEl.textContent = 'Invalid grid size';
     return;
   }
 
   statusEl.textContent = 'Computing volumes...';
+  updateRectVisual();
 
-  // Use setTimeout to allow UI to update
   setTimeout(() => {
-    const result = computeVolume(
-      terrainPoints, tinTriangles, polygonVertices,
-      padElev, slopeRatio, slopeMaxDist, gridSize
-    );
+    const result = computeVolume(terrainPoints, tinTriangles, rect, gridSize);
 
-    // Display results
     resultsPanel.style.display = 'block';
     document.getElementById('resCut')!.textContent = `${result.cut.toFixed(1)} m³`;
     document.getElementById('resFill')!.textContent = `${result.fill.toFixed(1)} m³`;
@@ -460,24 +397,22 @@ btnCompute.addEventListener('click', () => {
 
     statusEl.textContent = `Done. ${result.cellCount} cells sampled.`;
 
-    // Colorize terrain
-    colorizeTerrain(padElev, slopeRatio, slopeMaxDist);
+    colorizeTerrain(rect);
   }, 10);
 });
 
 // ─── Colorize terrain ────────────────────────────────────────────────
-function colorizeTerrain(padElev: number, slopeRatio: number, slopeMaxDist: number) {
+function colorizeTerrain(rect: Rectangle) {
   if (!terrainMesh) return;
 
   const colors = terrainMesh.geometry.getAttribute('color') as THREE.BufferAttribute;
 
-  // Find max dz for normalization
   let maxAbsDz = 0;
   const dzValues: (number | null)[] = [];
 
   for (let i = 0; i < terrainPoints.length; i++) {
     const p = terrainPoints[i];
-    const zDesign = designHeight(p.x, p.y, polygonVertices, padElev, slopeRatio, slopeMaxDist);
+    const zDesign = designHeight(p.x, p.y, rect);
     if (zDesign !== null) {
       const dz = zDesign - p.z;
       dzValues.push(dz);
@@ -492,7 +427,7 @@ function colorizeTerrain(padElev: number, slopeRatio: number, slopeMaxDist: numb
   for (let i = 0; i < terrainPoints.length; i++) {
     const dz = dzValues[i];
     if (dz === null) {
-      colors.setXYZ(i, 0.4, 0.4, 0.4); // outside design area: dark gray
+      colors.setXYZ(i, 0.4, 0.4, 0.4); // outside: dark gray
     } else {
       const t = Math.min(Math.abs(dz) / maxAbsDz, 1);
       if (dz < -0.01) {
@@ -502,7 +437,7 @@ function colorizeTerrain(padElev: number, slopeRatio: number, slopeMaxDist: numb
         // Fill: blue
         colors.setXYZ(i, 0.4 * (1 - t), 0.4 * (1 - t), 0.4 + 0.6 * t);
       } else {
-        // Neutral: green-ish
+        // Neutral: green
         colors.setXYZ(i, 0.3, 0.7, 0.3);
       }
     }
@@ -510,15 +445,3 @@ function colorizeTerrain(padElev: number, slopeRatio: number, slopeMaxDist: numb
 
   colors.needsUpdate = true;
 }
-
-// ─── Auto-suggest pad elevation from terrain ─────────────────────────
-csvInput.addEventListener('change', () => {
-  // After a small delay (let the main handler run first)
-  setTimeout(() => {
-    if (terrainPoints.length > 0) {
-      const minZ = Math.min(...terrainPoints.map(p => p.z));
-      inputPadElev.value = minZ.toFixed(1);
-      updatePadPlane();
-    }
-  }, 100);
-});

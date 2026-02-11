@@ -1,4 +1,8 @@
-import { Point2D } from './types';
+import { Point2D, Rectangle } from './types';
+
+export function pointInRectangle(p: Point2D, rect: Rectangle): boolean {
+  return p.x >= rect.minX && p.x <= rect.maxX && p.y >= rect.minY && p.y <= rect.maxY;
+}
 
 export function pointInPolygon(p: Point2D, polygon: Point2D[]): boolean {
   let inside = false;

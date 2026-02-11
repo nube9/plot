@@ -9,6 +9,15 @@ export interface Point2D {
   y: number;
 }
 
+export interface Rectangle {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  elevation: number;
+  padHeight: number;
+}
+
 export interface VolumeResult {
   cut: number;
   fill: number;

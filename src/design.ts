@@ -1,23 +1,13 @@
-import { Point2D } from './types';
-import { pointInPolygon, distanceToPolygon } from './geometry';
+import { Rectangle } from './types';
+import { pointInRectangle } from './geometry';
 
 export function designHeight(
   x: number,
   y: number,
-  polygon: Point2D[],
-  z0: number,
-  slopeRatio: number,
-  dMax: number
+  rect: Rectangle
 ): number | null {
-  const p: Point2D = { x, y };
-
-  if (pointInPolygon(p, polygon)) {
-    return z0;
+  if (pointInRectangle({ x, y }, rect)) {
+    return rect.elevation;
   }
-
-  const dist = distanceToPolygon(p, polygon);
-  if (dist > dMax) return null;
-
-  // Slope falls/rises from pad edge: design surface descends away from pad
-  return z0 - dist / slopeRatio;
+  return null;
 }
